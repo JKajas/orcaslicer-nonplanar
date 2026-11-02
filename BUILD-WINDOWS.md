@@ -68,6 +68,13 @@ cpack -G NSIS -C Release
 :: -> OrcaSlicer_Nonplanar_Windows_Installer_V2.4.2_x64.exe
 ```
 
+## First start
+
+The build is self-contained: no profiles or settings are shipped with it. On first start the app
+creates its own settings folder, `%APPDATA%\OrcaSlicerNonplanar`, and leaves an installed OrcaSlicer
+(`%APPDATA%\OrcaSlicer`) untouched. Nonplanar is on by default for every printer and process preset.
+Copying an existing OrcaSlicer config over is optional and not required for testing.
+
 ## Testing without a 3D printer
 
 Slice a model with a gently sloped top (up to 12 deg):
