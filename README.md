@@ -99,8 +99,6 @@ add the Quality setting *Use nonplanar layers* and switch it off.
   printing a collision.
 - **No move steeper than 12°**, checked on the final G-code.
 - **Top surfaces at 50 mm/s at most** on objects with nonplanar layers.
-- **Slope compensation:** downhill top lines are raised and uphill lines lowered slightly, so the line direction
-  doesn't show on slopes.
 
 ## Install
 
