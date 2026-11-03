@@ -329,7 +329,7 @@ index e9517480..a2eff09a 100644
      }
  
 diff --git a/src/libslic3r/GCode.cpp b/src/libslic3r/GCode.cpp
-index b9a81c54..3372459a 100644
+index b9a81c54..c8b76d9a 100644
 --- a/src/libslic3r/GCode.cpp
 +++ b/src/libslic3r/GCode.cpp
 @@ -6,6 +6,7 @@
@@ -340,7 +340,7 @@ index b9a81c54..3372459a 100644
  #include "Exception.hpp"
  #include "ExtrusionEntity.hpp"
  #include "EdgeGrid.hpp"
-@@ -84,6 +85,283 @@ using namespace std::literals::string_view_literals;
+@@ -84,6 +85,181 @@ using namespace std::literals::string_view_literals;
  
  namespace Slic3r {
  
@@ -411,108 +411,6 @@ index b9a81c54..3372459a 100644
 +// A conformal path carries absolute projected heights in Point3::z; planar
 +// material deferred to a later layer carries its own layer height there.
 +// (Z anti-aliasing offsets are excluded: ZAA and nonplanar layers are exclusive.)
-+// Nonplanar slope height compensation.  The flat nozzle tip presses the fresh
-+// line on a descending move (the surface behind the nozzle is higher) and
-+// leaves it round on an ascending one.  Descending moves are raised by
-+// raise * tip_radius * slope, ascending ones lowered by lower * tip_radius * slope.
-+// Where the direction turns, the change is ramped so that no move becomes
-+// steeper than tan(11.5 deg) (or the path's own slope, if steeper).
-+static void compensate_nonplanar_slope(Polyline3 &polyline, double raise, double lower, double tip_radius)
-+{
-+    if (polyline.points.size() < 2)
-+        return;
-+    // Long segments get extra points near their ends, so that a ramp at a
-+    // turn stays local instead of tilting the whole line.  A conformal
-+    // segment lies on one facet, so linear interpolation keeps it exact.
-+    {
-+        Points3 dense { polyline.points.front() };
-+        for (size_t i = 1; i < polyline.points.size(); ++ i) {
-+            const Point3 &a = polyline.points[i - 1], &b = polyline.points[i];
-+            const double  length = std::hypot(unscale<double>(b.x() - a.x()), unscale<double>(b.y() - a.y()));
-+            std::vector<double> ts;
-+            for (double d : { 0.25, 0.5, 1.0 })
-+                if (length > 4. * d) {
-+                    ts.push_back(d / length);
-+                    ts.push_back(1. - d / length);
-+                }
-+            std::sort(ts.begin(), ts.end());
-+            for (double t : ts)
-+                dense.emplace_back(Point3((a.cast<double>() + t * (b - a).cast<double>()).cast<coord_t>()));
-+            dense.push_back(b);
-+        }
-+        polyline.points = std::move(dense);
-+    }
-+    Points3 &pts = polyline.points;
-+    const size_t n = pts.size();
-+    std::vector<double> dxy(n - 1), dz(n - 1), seg(n - 1, 0.);
-+    for (size_t i = 0; i + 1 < n; ++ i) {
-+        dxy[i] = std::hypot(unscale<double>(pts[i + 1].x() - pts[i].x()), unscale<double>(pts[i + 1].y() - pts[i].y()));
-+        dz[i]  = unscale<double>(pts[i + 1].z() - pts[i].z());
-+        if (dxy[i] > 1e-3) {
-+            const double slope = dz[i] / dxy[i];
-+            seg[i] = slope < 0. ? raise * tip_radius * (- slope) : - lower * tip_radius * slope;
-+        }
-+    }
-+    // A point between two segments: length-weighted, so a long line keeps its
-+    // offset next to a short turn connector.
-+    std::vector<double> off(n);
-+    off.front() = seg.front();
-+    off.back()  = seg.back();
-+    for (size_t i = 1; i + 1 < n; ++ i)
-+        off[i] = dxy[i - 1] + dxy[i] > 0. ? (dxy[i - 1] * seg[i - 1] + dxy[i] * seg[i]) / (dxy[i - 1] + dxy[i]) : 0.;
-+    // Offset change allowed per segment: the move may not get steeper than
-+    // max(tan(11.5 deg), its own slope).  lo[i] <= off[i+1] - off[i] <= hi[i].
-+    const double max_gradient = std::tan(11.5 * M_PI / 180.);
-+    // Both directions corrected: each part gets half of the allowed change.
-+    const double share = raise > 0. && lower > 0. ? 0.5 : 1.;
-+    std::vector<double> lo(n - 1), hi(n - 1);
-+    for (size_t i = 0; i + 1 < n; ++ i) {
-+        const double allowed = std::max(max_gradient * dxy[i], std::abs(dz[i]));
-+        lo[i] = share * (- allowed - dz[i]);
-+        hi[i] = share * (  allowed - dz[i]);
-+    }
-+    // Smallest envelope above a non-negative target that satisfies the
-+    // bounds: corrections are carried into the neighbouring flatter parts and
-+    // ramped down there instead of being cut on a steep slope.
-+    auto envelope = [n](const std::vector<double> &target, const std::vector<double> &l, const std::vector<double> &h) {
-+        std::vector<double> e(target);
-+        for (size_t i = 1; i < n; ++ i)
-+            e[i] = std::max(e[i], e[i - 1] + l[i - 1]);
-+        for (size_t i = n - 1; i > 0; -- i)
-+            e[i - 1] = std::max(e[i - 1], e[i] - h[i - 1]);
-+        return e;
-+    };
-+    std::vector<double> up(n), down(n), neg_lo(n - 1), neg_hi(n - 1);
-+    for (size_t i = 0; i < n; ++ i) {
-+        up[i]   = std::max(off[i], 0.);
-+        down[i] = std::max(- off[i], 0.);
-+    }
-+    for (size_t i = 0; i + 1 < n; ++ i) {
-+        neg_lo[i] = - hi[i];
-+        neg_hi[i] = - lo[i];
-+    }
-+    // The ends of the path keep their height: consecutive pieces of one line
-+    // must join without a height step (a step would force a lifted travel).
-+    auto end_cap = [n](std::vector<double> e, const std::vector<double> &l, const std::vector<double> &h) {
-+        std::vector<double> from_start(n), from_end(n);
-+        from_start.front() = 0.;
-+        for (size_t i = 1; i < n; ++ i)
-+            from_start[i] = from_start[i - 1] + h[i - 1];
-+        from_end.back() = 0.;
-+        for (size_t i = n - 1; i > 0; -- i)
-+            from_end[i - 1] = from_end[i] - l[i - 1];
-+        for (size_t i = 0; i < n; ++ i)
-+            e[i] = std::max(0., std::min({ e[i], from_start[i], from_end[i] }));
-+        return e;
-+    };
-+    const std::vector<double> raised  = end_cap(envelope(up, lo, hi), lo, hi);
-+    const std::vector<double> lowered = end_cap(envelope(down, neg_lo, neg_hi), neg_lo, neg_hi);
-+    for (size_t i = 0; i < n; ++ i)
-+        off[i] = raised[i] - lowered[i];
-+    for (size_t i = 0; i < n; ++ i)
-+        pts[i].z() += coord_t(std::lround(scale_(off[i])));
-+}
-+
 +static bool path_has_absolute_z(const ExtrusionPath &path)
 +{
 +    return path.nonplanar_source ||
@@ -624,7 +522,7 @@ index b9a81c54..3372459a 100644
      //! macro used to mark string used at localization,
      //! return same string
  #define L(s) (s)
-@@ -2474,6 +2752,21 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
+@@ -2474,6 +2650,21 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
      m_last_height  = 0.f;
      m_last_layer_z = 0.f;
      m_max_layer_z  = 0.f;
@@ -646,7 +544,7 @@ index b9a81c54..3372459a 100644
      m_last_width = 0.f;
      m_is_role_based_fan_on.fill(false);
      m_role_based_fan_marker_layer.fill(-1);
-@@ -2574,6 +2867,11 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
+@@ -2574,6 +2765,11 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
          file.write_format("; HEADER_BLOCK_START\n");
          // Write information on the generator.
          file.write_format("; generated by %s on %s\n", Slic3r::header_slic3r_generated().c_str(), Slic3r::Utils::local_timestamp().c_str());
@@ -658,7 +556,7 @@ index b9a81c54..3372459a 100644
          if (is_bbl_printers)
              file.write_format(";%s\n", GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Estimated_Printing_Time_Placeholder).c_str());
          //BBS: total layer number
-@@ -3445,6 +3743,13 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
+@@ -3445,6 +3641,13 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
                  file.write(m_wipe_tower->finalize(*this));
          }
      }
@@ -672,7 +570,7 @@ index b9a81c54..3372459a 100644
      //BBS: the last retraction
      // Write end commands to file.
      file.write(this->retract(false, true));
-@@ -5143,6 +5448,15 @@ LayerResult GCode::process_layer(
+@@ -5143,6 +5346,15 @@ LayerResult GCode::process_layer(
      }
  
      auto insert_timelapse_gcode = [this, print_z, &print, &most_used_extruder, &layer_object_label_ids,&printed_objects = std::as_const(m_printed_objects)]() -> std::string {
@@ -688,7 +586,7 @@ index b9a81c54..3372459a 100644
          PosPickCtx ctx;
          ctx.curr_pos = { (coord_t)(scale_(m_writer.get_position().x())),(coord_t)(scale_(m_writer.get_position().y())) };
          ctx.curr_layer = this->layer();
-@@ -5376,6 +5690,16 @@ LayerResult GCode::process_layer(
+@@ -5376,6 +5588,16 @@ LayerResult GCode::process_layer(
                  // checking anything here.
                  m_extrusion_quality_estimator.set_current_object(&instance_to_print.print_object);
  
@@ -705,7 +603,7 @@ index b9a81c54..3372459a 100644
                  // When starting a new object, use the external motion planner for the first travel move.
                  const Point &offset = instance_to_print.print_object.instances()[instance_to_print.instance_id].shift;
                  std::pair<const PrintObject*, Point> this_object_copy(&instance_to_print.print_object, offset);
-@@ -5431,7 +5755,26 @@ LayerResult GCode::process_layer(
+@@ -5431,7 +5653,26 @@ LayerResult GCode::process_layer(
                  }
                  //FIXME order islands?
                  // Sequential tool path ordering of multiple parts within the same object, aka. perimeter tracking (#5511)
@@ -733,7 +631,7 @@ index b9a81c54..3372459a 100644
                      const auto& by_region_specific = is_anything_overridden ? island.by_region_per_copy(by_region_per_copy_cache, static_cast<unsigned int>(instance_to_print.instance_id), extruder_id, print_wipe_extrusions != 0) : island.by_region;
                      // When starting a new object, use the external motion planner for the first travel move.
                      const Point& offset = instance_to_print.print_object.instances()[instance_to_print.instance_id].shift;
-@@ -5467,6 +5810,8 @@ LayerResult GCode::process_layer(
+@@ -5467,6 +5708,8 @@ LayerResult GCode::process_layer(
                      // ironing
                      gcode += this->extrude_infill(print,by_region_specific, true);
                  }
@@ -742,7 +640,7 @@ index b9a81c54..3372459a 100644
  
                  if (this->config().gcode_label_objects) {
                      gcode += std::string("; stop printing object ") +
-@@ -5685,6 +6030,7 @@ std::string GCode::preamble()
+@@ -5685,6 +5928,7 @@ std::string GCode::preamble()
  std::string GCode::change_layer(coordf_t print_z)
  {
      std::string gcode;
@@ -750,7 +648,7 @@ index b9a81c54..3372459a 100644
      if (m_layer_count > 0)
          // Increment a progress bar indicator.
          gcode += m_writer.update_progress(++ m_layer_index, m_layer_count);
-@@ -5768,14 +6114,20 @@ std::string GCode::extrude_loop(const ExtrusionLoop&        loop_ref,
+@@ -5768,14 +6012,20 @@ std::string GCode::extrude_loop(const ExtrusionLoop&        loop_ref,
      // or, if `start_point` is specified, start the loop at point closest to it
      Point last_pos = start_point ? *start_point : this->last_pos();
      float seam_overhang = std::numeric_limits<float>::lowest();
@@ -773,7 +671,7 @@ index b9a81c54..3372459a 100644
          !m_config.spiral_mode &&
          (loop.role() == erExternalPerimeter || (loop.role() == erPerimeter && m_config.seam_slope_inner_walls)) &&
          layer_id() > 0;
-@@ -5821,7 +6173,7 @@ std::string GCode::extrude_loop(const ExtrusionLoop&        loop_ref,
+@@ -5821,7 +6071,7 @@ std::string GCode::extrude_loop(const ExtrusionLoop&        loop_ref,
      // If region perimeters size not greater than or equal to 2, then skip the wipe inside move as we will extrude in mid air
      // as no neighbouring perimeter exists. If an internal perimeter exists, we should find 2 perimeters touching the de-retraction point
      // 1 - the currently printed external perimeter and 2 - the neighbouring internal perimeter.
@@ -782,7 +680,7 @@ index b9a81c54..3372459a 100644
          const bool is_full_loop_ccw = loop.polygon().is_counter_clockwise();
          bool is_hole_loop = (loop.loop_role() & ExtrusionLoopRole::elrHole) != 0;
          const double nozzle_diam = nozzle_diameter;
-@@ -5976,7 +6328,9 @@ std::string GCode::extrude_loop(const ExtrusionLoop&        loop_ref,
+@@ -5976,7 +6226,9 @@ std::string GCode::extrude_loop(const ExtrusionLoop&        loop_ref,
      }
  
      // BBS
@@ -793,7 +691,7 @@ index b9a81c54..3372459a 100644
          m_wipe.path = Polyline();
          for (ExtrusionPath &path : paths) {
              //BBS: Don't need to save duplicated point into wipe path
-@@ -5991,7 +6345,7 @@ std::string GCode::extrude_loop(const ExtrusionLoop&        loop_ref,
+@@ -5991,7 +6243,7 @@ std::string GCode::extrude_loop(const ExtrusionLoop&        loop_ref,
      }
  
      // make a little move inwards before leaving loop
@@ -802,7 +700,7 @@ index b9a81c54..3372459a 100644
          // detect angle between last and first segment
          // the side depends on the original winding order of the polygon (inwards for contours, outwards for holes)
          //FIXME improve the algorithm in case the loop is tiny.
-@@ -6066,7 +6420,9 @@ std::string GCode::extrude_multi_path(const ExtrusionMultiPath& multipath, const
+@@ -6066,7 +6318,9 @@ std::string GCode::extrude_multi_path(const ExtrusionMultiPath& multipath, const
      }
  
      // BBS
@@ -813,7 +711,7 @@ index b9a81c54..3372459a 100644
          m_wipe.path = Polyline();
          for (const ExtrusionPath &path : multipath.paths) {
              //BBS: Don't need to save duplicated point into wipe path
-@@ -6084,11 +6440,214 @@ std::string GCode::extrude_multi_path(const ExtrusionMultiPath& multipath, const
+@@ -6084,11 +6338,214 @@ std::string GCode::extrude_multi_path(const ExtrusionMultiPath& multipath, const
      return gcode;
  }
  
@@ -1028,7 +926,7 @@ index b9a81c54..3372459a 100644
      if (const ExtrusionPath* path = dynamic_cast<const ExtrusionPath*>(&entity))
          return this->extrude_path(*path, description, speed);
      else if (const ExtrusionMultiPath* multipath = dynamic_cast<const ExtrusionMultiPath*>(&entity))
-@@ -6107,7 +6666,11 @@ std::string GCode::extrude_path(const ExtrusionPath& path, const std::string& de
+@@ -6107,7 +6564,11 @@ std::string GCode::extrude_path(const ExtrusionPath& path, const std::string& de
      m_multi_flow_segment_path_average_mm3_per_mm = 0;
      //    description += ExtrusionEntity::role_to_string(path.role());
      std::string gcode = this->_extrude(path, description, speed);
@@ -1041,7 +939,7 @@ index b9a81c54..3372459a 100644
          m_wipe.path = path.polyline.to_polyline();
          if (is_tree(this->config().support_type) && (path.role() == erSupportMaterial || path.role() == erSupportMaterialInterface || path.role() == erSupportTransition)) {
              if ((m_wipe.path.first_point() - m_wipe.path.last_point()).cast<double>().norm() > scale_(0.2)) {
-@@ -6140,7 +6703,13 @@ std::string GCode::extrude_perimeters(const Print &print, const std::vector<Obje
+@@ -6140,7 +6601,13 @@ std::string GCode::extrude_perimeters(const Print &print, const std::vector<Obje
                  : (m_config.is_infill_first == is_infill_first);
              if (!should_print) continue;
  
@@ -1056,7 +954,7 @@ index b9a81c54..3372459a 100644
                  gcode += this->extrude_entity(*ee, "perimeter", -1., region.perimeters);
          }
      return gcode;
-@@ -6161,14 +6730,26 @@ std::string GCode::extrude_infill(const Print &print, const std::vector<ObjectBy
+@@ -6161,14 +6628,26 @@ std::string GCode::extrude_infill(const Print &print, const std::vector<ObjectBy
                      extrusions.emplace_back(ee);
              if (! extrusions.empty()) {
                  m_config.apply(print.get_print_region(&region - &by_region.front()).config());
@@ -1091,7 +989,7 @@ index b9a81c54..3372459a 100644
                  }
              }
          }
-@@ -6303,6 +6884,9 @@ void GCode::GCodeOutputStream::write_format(const char* format, ...)
+@@ -6303,6 +6782,9 @@ void GCode::GCodeOutputStream::write_format(const char* format, ...)
  
  bool GCode::_needSAFC(const ExtrusionPath &path)
  {
@@ -1101,35 +999,7 @@ index b9a81c54..3372459a 100644
      if (!m_small_area_infill_flow_compensator || !m_config.small_area_infill_flow_compensation.value)
          return false;
  
-@@ -6344,11 +6928,71 @@ double GCode::calc_max_volumetric_speed(const double layer_height, const double
- 
- std::string GCode::_extrude(const ExtrusionPath &path, std::string description, double speed)
- {
-+    // Nonplanar slope height compensation of the top surface lines of the
-+    // nonplanar top shell: emit a copy with adjusted heights.
-+    // Fixed half/half split (user decision 2026-10-26 after test prints):
-+    // descending lines raised, ascending lines lowered by half the correction each.
-+    const bool topmost_nonplanar = path.role() == erTopSolidInfill && path.nonplanar_source &&
-+        path.distance_to_top >= 0.f && path.distance_to_top < 1e-4f;
-+    if (! m_slope_compensating && topmost_nonplanar) {
-+        constexpr double downhill_raise = 0.5;
-+        constexpr double uphill_lower   = 0.5;
-+        ExtrusionPath compensated(path);
-+        compensate_nonplanar_slope(compensated.polyline, downhill_raise, uphill_lower, m_nonplanar_clearance.tip_radius_mm);
-+        m_slope_compensating = true;
-+        std::string out;
-+        try {
-+            out = this->_extrude(compensated, description, speed);
-+        } catch (...) {
-+            m_slope_compensating = false;
-+            throw;
-+        }
-+        m_slope_compensating = false;
-+        return out;
-+    }
-+
-     std::string gcode;
- 
+@@ -6349,6 +6831,43 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description,
      if (is_bridge(path.role()))
          description += " (bridge)";
  
@@ -1173,7 +1043,7 @@ index b9a81c54..3372459a 100644
      const ExtrusionPathSloped* sloped = dynamic_cast<const ExtrusionPathSloped*>(&path);
  
      const auto get_sloped_z = [&sloped, this](double z_ratio) {
-@@ -6365,12 +7009,16 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description,
+@@ -6365,12 +6884,16 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description,
      // path is 2D. But in slope lift case, lift z is done in travel_to function.
      // Add m_need_change_layer_lift_z when change_layer in case of no lift if m_last_pos is equal to path.first_point() by chance
      Point first_point = path.first_point();
@@ -1191,7 +1061,7 @@ index b9a81c54..3372459a 100644
          } else if (path.z_contoured && !path.polyline.lines().empty()) {
              z = unscale_(path.polyline.lines().begin()->a.z()) + m_nominal_z;
          }
-@@ -6378,7 +7026,7 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description,
+@@ -6378,7 +6901,7 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description,
          gcode += this->travel_to(first_point, path.role(), "move to first " + description + " point", z);
  
          // Orca: ensure Z matches planned layer height
@@ -1200,7 +1070,7 @@ index b9a81c54..3372459a 100644
              const std::string z_sync_comment = _last_pos_undefined ?
                  "ensure Z matches planned layer height" : ""; // no comment for normal layer-Z lift
              gcode += this->writer().travel_to_z(m_nominal_z, z_sync_comment, true);
-@@ -6393,7 +7041,11 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description,
+@@ -6393,7 +6916,11 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description,
              gcode += m_writer.travel_to_z(first_z, "set Z for contouring", true);
          }
      }
@@ -1213,7 +1083,7 @@ index b9a81c54..3372459a 100644
          double current_z = m_writer.get_position().z();
          if (GCodeFormatter::quantize_xyzf(current_z) != GCodeFormatter::quantize_xyzf(m_nominal_z)) {
              gcode += this->writer().travel_to_z(m_nominal_z, "reset Z after contouring", true);
-@@ -6471,7 +7123,10 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description,
+@@ -6471,7 +6998,10 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description,
      _mm3_per_mm *= filament_flow_ratio;
  
      if (path.role() == erTopSolidInfill) {
@@ -1225,7 +1095,7 @@ index b9a81c54..3372459a 100644
      } else if (path.role() == erBottomSurface) {
          _mm3_per_mm *= m_config.bottom_solid_infill_flow_ratio;
      } else if (path.role() == erInternalBridgeInfill) {
-@@ -6560,6 +7215,12 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description,
+@@ -6560,6 +7090,12 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description,
  
      if (speed == 0)
          speed = filament_max_volumetric_speed / _mm3_per_mm;
@@ -1238,7 +1108,7 @@ index b9a81c54..3372459a 100644
      
      const auto _layer = layer_id();
      if (this->on_first_layer() || object_layer_over_raft()) {
-@@ -6654,7 +7315,9 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description,
+@@ -6654,7 +7190,9 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description,
      bool variable_speed = false;
      std::vector<ProcessedPoint> new_points {};
  
@@ -1249,7 +1119,7 @@ index b9a81c54..3372459a 100644
          (is_bridge(path.role()) || is_perimeter(path.role()))) {
              bool is_external = is_external_perimeter(path.role());
              double ref_speed   = is_external ? m_config.get_abs_value("outer_wall_speed") : m_config.get_abs_value("inner_wall_speed");
-@@ -6989,7 +7652,21 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description,
+@@ -6989,7 +7527,21 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description,
              }
              // BBS: use G1 if not enable arc fitting or has no arc fitting result or in spiral_mode mode or we are doing sloped extrusion
              // Attention: G2 and G3 is not supported in spiral_mode mode
@@ -1272,7 +1142,7 @@ index b9a81c54..3372459a 100644
                  double path_length = 0.;
                  double total_length = sloped == nullptr ? 0. : path.polyline.length() * SCALING_FACTOR;
                  double saved_z      = m_writer.get_position().z();
-@@ -7256,6 +7933,19 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description,
+@@ -7256,6 +7808,19 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description,
        m_last_notgapfill_extrusion_role = path.role();
      }
  
@@ -1292,7 +1162,7 @@ index b9a81c54..3372459a 100644
      this->set_last_pos(path.last_point());
      return gcode;
  }
-@@ -7357,6 +8047,25 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
+@@ -7357,6 +7922,25 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
      // check whether a straight travel move would need retraction
      LiftType lift_type = LiftType::SpiralLift;
      bool needs_retraction = this->needs_retraction(travel, role, lift_type);
@@ -1318,7 +1188,7 @@ index b9a81c54..3372459a 100644
      // check whether wipe could be disabled without causing visible stringing
      bool could_be_wipe_disabled       = false;
      // Save state of use_external_mp_once for the case that will be needed to call twice m_avoid_crossing_perimeters.travel_to.
-@@ -7415,7 +8124,8 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
+@@ -7415,7 +7999,8 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
  
      // if a retraction would be needed, try to use reduce_crossing_wall to plan a
      // multi-hop travel path inside the configuration space
@@ -1328,7 +1198,7 @@ index b9a81c54..3372459a 100644
          && !m_avoid_crossing_perimeters.disabled_once()
          && m_writer.is_current_position_clear())
          //BBS: don't generate detour travel paths when current position is unclea
-@@ -7467,7 +8177,26 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
+@@ -7467,7 +8052,26 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
      m_writer.add_object_change_labels(gcode);
  
      // use G1 because we rely on paths being straight (G0 may make round paths)
@@ -1356,7 +1226,7 @@ index b9a81c54..3372459a 100644
          // Orca: use `travel_to_xyz` to ensure we start at the correct z, in case we moved z in custom/filament change gcode
          if (false/*m_spiral_vase*/) {
              // No lazy z lift for spiral vase mode
-@@ -7505,10 +8234,22 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
+@@ -7505,10 +8109,22 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
          }
          this->set_last_pos(travel.points.back());
      }
@@ -1379,7 +1249,7 @@ index b9a81c54..3372459a 100644
  //BBS
  LiftType GCode::to_lift_type(ZHopType z_hop_types) {
      switch (z_hop_types)
-@@ -7653,9 +8394,33 @@ std::string GCode::retract(bool toolchange, bool is_last_retraction, LiftType li
+@@ -7653,9 +8269,33 @@ std::string GCode::retract(bool toolchange, bool is_last_retraction, LiftType li
  {
      std::string gcode;
  
@@ -1414,7 +1284,7 @@ index b9a81c54..3372459a 100644
      if (FILAMENT_CONFIG(wipe) && m_wipe.has_path() && scale_(FILAMENT_CONFIG(wipe_distance)) > SCALED_EPSILON) {
          Wipe::RetractionValues wipeRetractions = m_wipe.calculateWipeRetractionLengths(*this, toolchange);
 diff --git a/src/libslic3r/GCode.hpp b/src/libslic3r/GCode.hpp
-index 176af4c5..cb94a3b6 100644
+index 176af4c5..435baf38 100644
 --- a/src/libslic3r/GCode.hpp
 +++ b/src/libslic3r/GCode.hpp
 @@ -5,6 +5,7 @@
@@ -1443,7 +1313,7 @@ index 176af4c5..cb94a3b6 100644
      bool            needs_retraction(const Polyline& travel, ExtrusionRole role, LiftType& lift_type);
      std::string     retract(bool toolchange = false, bool is_last_retraction = false, LiftType lift_type = LiftType::NormalLift, bool apply_instantly = false, ExtrusionRole role = erNone);
      std::string     unretract() { return m_writer.unlift() + m_writer.unretract(); }
-@@ -607,6 +612,59 @@ private:
+@@ -607,6 +612,57 @@ private:
      Point3                              m_last_pos;
      bool                                m_last_pos_defined;
  
@@ -1489,8 +1359,6 @@ index 176af4c5..cb94a3b6 100644
 +    bool                                m_force_safe_travel_once { false };
 +    // Set while a deferred loop is emitted: its seam was placed in its own layer.
 +    bool                                m_loop_seam_placed { false };
-+    // Set while _extrude() emits a slope-compensated copy of a top surface line.
-+    bool                                m_slope_compensating { false };
 +    // Queue the whole entity if the plan moves it to a later slot.
 +    bool                                defer_planar_material(const ExtrusionEntity &entity, const std::string &description,
 +                                                              double speed, std::string &gcode);

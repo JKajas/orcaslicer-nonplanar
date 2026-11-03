@@ -4,7 +4,7 @@ First public test release of OrcaSlicer Nonplanar (OrcaSlicer 2.4.2) for macOS (
 - Nonplanar top surfaces up to 12° and 5 mm height span; the visible top shell is printed in one piece.
 - Collision check against a simplified hotend model (tip, 12° cone, heater block), with planned print order.
 - No move steeper than 12° in the G-code; clear messages when a model can't be sliced collision-free.
-- Slope compensation, top line direction and top flow ratio options; top surfaces at 50 mm/s at most.
+- Top line direction and top flow ratio options; top surfaces at 50 mm/s at most.
 - Own settings folder; an installed OrcaSlicer (settings, file associations, links) stays untouched.
 
 **Compared with the original PrusaSlicer nonplanar build (2.6.0+teachingtechYT)**, tested on 8 models with the
