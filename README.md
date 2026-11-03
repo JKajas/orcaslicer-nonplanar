@@ -4,6 +4,8 @@
 > **Official build: macOS with Apple Silicon (M1 or newer).**
 > v0.1 ships no Intel Mac, Windows or Linux binary, but the source now also builds on
 > Windows with MSVC — see [`BUILD-WINDOWS.md`](BUILD-WINDOWS.md).
+>
+> **Linux:** there is an unofficial [community AppImage](#linux-community-build) for x86_64.
 
 **Test release.** OrcaSlicer 2.4.2 with **nonplanar top surfaces**: the last shells of gently sloped tops
 (up to 12°) follow the surface instead of being printed as stair steps. Every nonplanar move is checked against
@@ -83,7 +85,7 @@ add the Quality setting *Use nonplanar layers* and switch it off.
   Steeper or taller areas are printed planar as usual.
 - **Preview helpers:** conformal paths are drawn in their own color (bright magenta) in the G-code
   preview, and a small framed **NP** marker next to the plate thumbnail appears only when the sliced
-  output actually contains nonplanar layers. Currently only with the Windows patch, not in the macOS download.
+  output actually contains nonplanar layers. Currently only with the Windows patch and in the Linux community build, not in the macOS download.
 - **Collision check against a hotend model**, not just an angle:
   - flat nozzle tip Ø 1.1 mm;
   - 12° cone and heater block;
@@ -123,6 +125,23 @@ Download `OrcaSlicer-Nonplanar-v0.1-macOS-arm64.dmg` from
 > After that, the app opens normally.
 
 Requirements: Apple Silicon Mac (M1 or newer), macOS 11.3 or newer.
+
+## Linux (community build)
+
+[3DEnthusiast](https://github.com/3DEnthusiast) maintains an unofficial x86_64 AppImage, built on Zorin OS
+(based on Ubuntu 24.04):
+[`OrcaSlicer-Nonplanar.AppImage`](https://github.com/3DEnthusiast/orcaslicer-nonplanar/releases/tag/v0.1-linux).
+It has not been tested by this project, so please report Linux-specific problems in
+[that fork's issues](https://github.com/3DEnthusiast/orcaslicer-nonplanar/issues).
+
+```bash
+chmod +x OrcaSlicer-Nonplanar.AppImage && ./OrcaSlicer-Nonplanar.AppImage
+```
+
+- If the 3D view or dialogs misbehave on Wayland: `GDK_BACKEND=x11 ./OrcaSlicer-Nonplanar.AppImage`
+- If it won't start because FUSE is missing: `./OrcaSlicer-Nonplanar.AppImage --appimage-extract-and-run`
+
+To build it yourself, see [`BUILD-LINUX.md`](BUILD-LINUX.md).
 
 ## First start
 
@@ -171,6 +190,7 @@ This project stands on the work of others. Thank you!
 - **The OrcaSlicer team and community** (SoftFever and all contributors), and the projects OrcaSlicer builds on:
   **Bambu Studio**, **PrusaSlicer** and **Slic3r**.
 - **[SFRSKZ](https://github.com/SFRSKZ)**: Windows port.
+- **[3DEnthusiast](https://github.com/3DEnthusiast)**: Linux port.
 - **Anthropic's Claude** (in Claude Code), which supported coding.
 
 Improvements over the earlier nonplanar builds:
